@@ -1,20 +1,35 @@
 .POSIX:
 .SUFFIXES:
+
+# Compiler settings
 CC = cc
-CFLAGS = -W -O
+CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -O2
+CPPFLAGS = -D_DEFAULT_SOURCE
+LDFLAGS =
 LDLIBS = -lusb
 
-all: s1display
-s1display: log.o main.o lcd_device.o
-	$(CC) $(LDFLAGS) -o s1display log.o lcd_device.o  main.o $(LDLIBS)
-log.o: log.c log.h
-lcd_device.o: lcd_device.c lcd_device.h
-main.o: main.c
-clean:
-	rm s1display log.o lcd_device.o main.o
+# Project files
+SRCS = main.c log.c lcd_device.c
+OBJS = $(SRCS:.c=.o)
+TARGET = s1display
 
+# Targets
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+
+# Dependencies
+main.o: main.c log.h lcd_device.h
+log.o: log.c log.h
+lcd_device.o: lcd_device.c lcd_device.h log.h
+
+# Generic rules
 .SUFFIXES: .c .o
 .c.o:
-	$(CC) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $<
 
-.PHONY: all clean
+clean:
+	rm -f $(TARGET) $(OBJS)

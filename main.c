@@ -2,6 +2,7 @@
 #include <unistd.h>             /* sleep() */
 #include <signal.h>
 #include <libusb.h>
+#include <errno.h>
 
 #include "log.h"
 #include "lcd_device.h"
@@ -9,36 +10,48 @@
 #define VENDOR_ID  0x04d9
 #define PRODUCT_ID 0xfd01
 
+/* Error codes */
+enum {
+    SUCCESS = 0,
+    ERR_ARGS = -1,
+    ERR_USB_INIT = -2,
+    ERR_NO_DEVICE = -3,
+    ERR_USB_CLAIM = -4,
+    ERR_USB_CONFIG = -5
+};
+
 static volatile sig_atomic_t keep_running = 1;
 
-void sig_handler(int sig) {
+static void sig_handler(int sig) {
     (void)sig;
     keep_running = 0;
 }
 
-void usage() {
-    printf("Usage: s1display [-l trace|debug|info|warn|error]\n");
+static void usage(const char *progname) {
+    printf("Usage: %s [-l trace|debug|info|warn|error]\n", progname);
 }
 
 int main(int argc, char *argv[]) {
     int ch;
-    int ret = 0;
-    libusb_device *dev, **devs;
+    int ret = SUCCESS;
+    libusb_device *dev = NULL;
+    libusb_device **devs = NULL;
     struct libusb_device_descriptor desc;
     struct libusb_config_descriptor *config_desc = NULL;
+    libusb_device_handle *handle = NULL;
 
     while ((ch = getopt(argc, argv, "l:")) != -1) {
         switch (ch) {
         case 'l':
             if (log_set_level_by_string(optarg) != 0) {
-                usage();
-                return 1;
+                usage(argv[0]);
+                return ERR_ARGS;
             }
             break;
         case '?':
         default:
-            usage();
-            return 1;
+            usage(argv[0]);
+            return ERR_ARGS;
         }
     }
     argc -= optind;
@@ -46,144 +59,158 @@ int main(int argc, char *argv[]) {
 
     log_info("Start");
 
-    signal(SIGINT, sig_handler);
-    signal(SIGTERM, sig_handler);
+    /* Set up signal handlers */
+    struct sigaction sa;
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) == -1 || sigaction(SIGTERM, &sa, NULL) == -1) {
+        log_error("Failed to set up signal handlers");
+        return ERR_ARGS;
+    }
 
-    int err = libusb_init_context( /* ctx= */ NULL, /* options= */ NULL, /* num_options= */ 0);
+    int err = libusb_init_context(NULL, NULL, 0);
     if (err != 0) {
         log_error("unable to init USB context: %s", libusb_error_name(err));
-        return 1;
+        return ERR_USB_INIT;
     }
 
     int dev_count = libusb_get_device_list(NULL, &devs);
     if (dev_count < 0) {
         log_error("unable to get device list: %s", libusb_error_name(dev_count));
-        libusb_exit(NULL);
-        return 1;
+        ret = ERR_USB_INIT;
+        goto cleanup_exit;
     } else if (dev_count == 0) {
         log_error("no USB devices found. Do you have enough permissions to list them?");
-        libusb_exit(NULL);
-        return 1;
+        ret = ERR_NO_DEVICE;
+        goto cleanup_exit;
     }
 
-    for (int i; (dev = devs[i]) != NULL; i++) {
-        err = libusb_get_device_descriptor(dev, &desc);
+    /* Find our device */
+    for (int i = 0; devs[i] != NULL; i++) {
+        err = libusb_get_device_descriptor(devs[i], &desc);
         if (err != 0) {
-            log_error("unable to get device descriptor for the device number %d: %s", i, libusb_error_name(err));
-            libusb_exit(NULL);
-            return 1;
+            log_error("unable to get device descriptor for device %d: %s", 
+                     i, libusb_error_name(err));
+            continue;
         }
 
         if (desc.idVendor == VENDOR_ID && desc.idProduct == PRODUCT_ID) {
+            dev = devs[i];
             log_debug("found the required USB device");
-            err = libusb_get_active_config_descriptor(dev, &config_desc);
-            if (err != 0) {
-                log_error("unable to get active configuration: %s", libusb_error_name(err));
-                ret = 1;
-                goto free_device_list;
-            }
             break;
         }
-
-        log_trace("skipping the device %04x:%04x", desc.idVendor, desc.idProduct);
+        log_trace("skipping device %04x:%04x", desc.idVendor, desc.idProduct);
     }
 
-
-    if (config_desc == NULL) {
+    if (dev == NULL) {
         log_error("the Holtek LCD screen is not found");
-        ret = 1;
-        goto free_device_list;
+        ret = ERR_NO_DEVICE;
+        goto cleanup_exit;
     }
 
-    log_debug("the device's configuration has got %d interfaces", config_desc->bNumInterfaces);
+    err = libusb_get_active_config_descriptor(dev, &config_desc);
+    if (err != 0) {
+        log_error("unable to get active configuration: %s", libusb_error_name(err));
+        ret = ERR_USB_CONFIG;
+        goto cleanup_exit;
+    }
+
+    /* Find the output endpoint */
     uint8_t endpoint_out = 0;
     int interface_num = -1;
     for (int i = 0; i < config_desc->bNumInterfaces; i++) {
-        struct libusb_interface iface = config_desc->interface[i];
-        log_debug("interface %d has got %d altsettings", i, iface.num_altsetting);
-        log_debug("interface %d has got %d endpoints", i, iface.altsetting[0].bNumEndpoints);
-        if (iface.num_altsetting == 1 && iface.altsetting[0].bNumEndpoints == 1) {
-            log_trace("endpoint address for interface %d is %02x", i, iface.altsetting[0].endpoint[0].bEndpointAddress);
-            if (!(iface.altsetting[0].endpoint[0].bEndpointAddress & LIBUSB_ENDPOINT_IN)) {
-                log_debug("found OUT endpoint");
-                endpoint_out = iface.altsetting[0].endpoint[0].bEndpointAddress;
-                interface_num = i;
-                break;
-            }
+        const struct libusb_interface *iface = &config_desc->interface[i];
+        if (iface->num_altsetting != 1) continue;
+        
+        const struct libusb_interface_descriptor *iface_desc = &iface->altsetting[0];
+        if (iface_desc->bNumEndpoints != 1) continue;
+
+        const struct libusb_endpoint_descriptor *ep = &iface_desc->endpoint[0];
+        if (!(ep->bEndpointAddress & LIBUSB_ENDPOINT_IN)) {
+            endpoint_out = ep->bEndpointAddress;
+            interface_num = i;
+            log_debug("found OUT endpoint 0x%02x on interface %d", endpoint_out, i);
+            break;
         }
     }
 
     if (endpoint_out == 0) {
-        log_info("endpoint not found, exiting...");
-        ret = 1;
-        goto free_device_list;
+        log_error("suitable endpoint not found");
+        ret = ERR_USB_CONFIG;
+        goto cleanup_exit;
     }
-
-    libusb_device_handle *handle;
 
     err = libusb_open(dev, &handle);
     if (err) {
         log_error("unable to open device: %s", libusb_error_name(err));
-        ret = 1;
-        goto free_device_list;
+        ret = ERR_USB_CLAIM;
+        goto cleanup_exit;
     }
 
     int status = libusb_kernel_driver_active(handle, interface_num);
     if (status != 0) {
-        log_error("unable to clame interface as %s", status == 1 ? "kernel driver is active" : "there's some error");
-        libusb_close(handle);
-        ret = 1;
-        goto free_device_list;
+        log_error("unable to claim interface: %s", 
+                 status == 1 ? "kernel driver is active" : "unknown error");
+        ret = ERR_USB_CLAIM;
+        goto cleanup_handle;
     }
 
     err = libusb_claim_interface(handle, interface_num);
     if (err != 0) {
-        log_error("unable to clame interface: %s", libusb_error_name(err));
-        libusb_close(handle);
-        ret = 1;
-        goto free_device_list;
+        log_error("unable to claim interface: %s", libusb_error_name(err));
+        ret = ERR_USB_CLAIM;
+        goto cleanup_handle;
     }
 
+    /* Initialize the display */
     err = lcd_set_orientation(handle, endpoint_out, true);
     if (err < 0) {
-        log_error("unable to submit transfer: %s", libusb_error_name(err));
-        ret = 1;
-        goto release_interface;
+        log_error("unable to set orientation: %s", libusb_error_name(err));
+        ret = ERR_USB_CONFIG;
+        goto cleanup_interface;
     }
 
     if (lcd_set_time(handle, endpoint_out) < 0) {
-        ret = 1;
-        goto release_interface;
+        ret = ERR_USB_CONFIG;
+        goto cleanup_interface;
     }
 
-    /* Paint it in black. */
+    /* Paint it black */
     if (lcd_redraw(handle, endpoint_out) < 0) {
-        ret = 1;
-        goto release_interface;
+        ret = ERR_USB_CONFIG;
+        goto cleanup_interface;
     }
 
+    /* Main loop */
     while (keep_running) {
-        log_trace("in the loop before sleep");
-        sleep(1);
-        log_trace("in the loop after sleep");
-        /* Send heartbeat. */
+        log_trace("sending heartbeat");
         if (lcd_send_heartbeat(handle, endpoint_out) < 0) {
-            ret = 1;
-            goto release_interface;
+            ret = ERR_USB_CONFIG;
+            break;
         }
+        sleep(1);
     }
 
-release_interface:
+cleanup_interface:
     err = libusb_release_interface(handle, interface_num);
     if (err != 0) {
         log_error("unable to release interface: %s", libusb_error_name(err));
-		ret = 1;
+        ret = ERR_USB_CLAIM;
     }
 
-    libusb_close(handle);
+cleanup_handle:
+    if (handle) {
+        libusb_close(handle);
+    }
 
-free_device_list:
-    libusb_free_device_list(devs, 1);
+cleanup_exit:
+    if (config_desc) {
+        libusb_free_config_descriptor(config_desc);
+    }
+    if (devs) {
+        libusb_free_device_list(devs, 1);
+    }
     libusb_exit(NULL);
     log_info("Stop");
 
