@@ -50,4 +50,4 @@ int lcd_redraw(libusb_device_handle * const handle, const uint8_t endpoint_addre
  */
 int lcd_update(libusb_device_handle * const handle, const uint8_t endpoint_address);
 
-#endif /* LCD_DEVICE_H */
+#endif                          /* LCD_DEVICE_H */

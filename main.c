@@ -90,8 +90,8 @@ int main(int argc, char *argv[]) {
     for (int i = 0; devs[i] != NULL; i++) {
         err = libusb_get_device_descriptor(devs[i], &desc);
         if (err != 0) {
-            log_error("unable to get device descriptor for device %d: %s", 
-                     i, libusb_error_name(err));
+            log_error("unable to get device descriptor for device %d: %s",
+                      i, libusb_error_name(err));
             continue;
         }
 
@@ -121,10 +121,12 @@ int main(int argc, char *argv[]) {
     int interface_num = -1;
     for (int i = 0; i < config_desc->bNumInterfaces; i++) {
         const struct libusb_interface *iface = &config_desc->interface[i];
-        if (iface->num_altsetting != 1) continue;
-        
+        if (iface->num_altsetting != 1)
+            continue;
+
         const struct libusb_interface_descriptor *iface_desc = &iface->altsetting[0];
-        if (iface_desc->bNumEndpoints != 1) continue;
+        if (iface_desc->bNumEndpoints != 1)
+            continue;
 
         const struct libusb_endpoint_descriptor *ep = &iface_desc->endpoint[0];
         if (!(ep->bEndpointAddress & LIBUSB_ENDPOINT_IN)) {
@@ -150,8 +152,8 @@ int main(int argc, char *argv[]) {
 
     int status = libusb_kernel_driver_active(handle, interface_num);
     if (status != 0) {
-        log_error("unable to claim interface: %s", 
-                 status == 1 ? "kernel driver is active" : "unknown error");
+        log_error("unable to claim interface: %s",
+                  status == 1 ? "kernel driver is active" : "unknown error");
         ret = ERR_USB_CLAIM;
         goto cleanup_handle;
     }

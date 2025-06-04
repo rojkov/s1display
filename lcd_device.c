@@ -1,6 +1,6 @@
 #include "lcd_device.h"
 
-#include <stdlib.h>  // for calloc()
+#include <stdlib.h>  // for alloca()
 #include <string.h>  // for memset(), memcpy()
 #include <time.h>    // for time_t, localtime(), time(), struct tm
 #include <libusb.h>
@@ -11,29 +11,28 @@
 #define RGB565(r, g, b) (((r & 0x1F) << 11) | ((g & 0x3F) << 5) | (b & 0x1F))
 #define SWAPENDIAN(num) (num>>8) | (num<<8);
 
-static const size_t BUFFER_SIZE = 4104;
-static const size_t HEADER_SIZE = 8;
-static const size_t DATA_SIZE = 4096;
+#define BUFFER_SIZE 4104
+#define DATA_SIZE 4096
 
-static const uint8_t LCD_SIGNATURE = 0x55;
-static const uint8_t LCD_CONFIG = 0xA1;
-static const uint8_t LCD_REFRESH = 0xA2;
-static const uint8_t LCD_REDRAW = 0xA3;
+#define LCD_SIGNATURE 0x55
+#define LCD_CONFIG 0xA1
+#define LCD_REFRESH 0xA2
+#define LCD_REDRAW 0xA3
 
-static const uint8_t LCD_ORIENTATION = 0xF1;
-static const uint8_t LCD_HEARTBEAT = 0xF2;
-static const uint8_t LCD_SET_TIME = 0xF3;
+#define LCD_ORIENTATION 0xF1
+#define LCD_HEARTBEAT 0xF2
+#define LCD_SET_TIME 0xF3
 
-static const uint8_t LCD_LANDSCAPE = 0x01;
-static const uint8_t LCD_PORTRAIT = 0x02;
+#define LCD_LANDSCAPE 0x01
+#define LCD_PORTRAIT 0x02
 
-static const uint8_t LCD_REDRAW_START = 0xF0;
-static const uint8_t LCD_REDRAW_CONTINUE = 0xF1;
-static const uint8_t LCD_REDRAW_END = 0xF2;
+#define LCD_REDRAW_START 0xF0
+#define LCD_REDRAW_CONTINUE 0xF1
+#define LCD_REDRAW_END 0xF2
 
-static const size_t CHUNK_COUNT = 27;
-static const size_t FINAL_CHUNK_INDEX = CHUNK_COUNT - 1;
-static const size_t FINAL_CHUNK_SIZE = 2304;
+#define CHUNK_COUNT 27
+#define FINAL_CHUNK_INDEX (CHUNK_COUNT - 1)
+#define FINAL_CHUNK_SIZE 2304
 
 int lcd_set_orientation(libusb_device_handle * handle, uint8_t endpoint_address, bool portrait) {
     uint8_t *buffer = (uint8_t *) alloca(BUFFER_SIZE);
